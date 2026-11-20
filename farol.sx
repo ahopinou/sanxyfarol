@@ -1,0 +1,242 @@
+# farol do sanxyC: o endereço público (no Render) que as IAs chamam como MCP e que a ponte do celular busca.
+# Ele não guarda nada além da fila dos pedidos em andamento (pasta fila/); quem atende é o MCP no celular.
+#   POST /mcp=CHAVE              as IAs (MCP por HTTP, respostas em JSON); outro método dá 405
+#   POST /ponte/esperar          a ponte busca o próximo pedido (espera até 25 s)
+#   POST /ponte/responder?id=N   a ponte devolve a resposta
+#   GET  /saude                  vivo, se a ponte apareceu no último minuto e quantos pedidos esperam
+# Ambiente: SANXYC_CHAVE (obrigatória, 16 caracteres ou mais; a mesma do .env do celular) e PORT (o Render dá).
+# Compilar para o Render (na pasta sanxyC):  ./ligar farol
+#   (ou: sanxy/bin/sanxyc farol/farol.sx -o farol/farol-linux-x64 --alvo linux-x64)
+usar "../sanxy/pecas/texto".
+usar "../sanxy/pecas/ordenar".
+
+definir fa_nulo de x
+  guardar x em y.
+fim.
+
+definir fa_tem de obj e k
+  se tipo de obj é diferente de "objeto" então
+    devolver 0.
+  fim.
+  para cada c em chaves de obj
+    se c é igual a k então
+      devolver 1.
+    fim.
+  fim.
+  devolver 0.
+fim.
+
+definir fa_erro_rpc de id e codigo e mensagem
+  guardar um mapa vazio em r.
+  colocar de r e "jsonrpc" e "2.0".
+  colocar de r e "id" e id.
+  colocar de r e "error" e (um registro com code codigo, message mensagem).
+  devolver json de r.
+fim.
+
+# o que chegou em /mcp=CHAVE: "pedido" (tem id), "aviso" (notificação ou resposta: 202) ou "invalido"
+definir fa_classificar de corpo
+  guardar 0 em ok.
+  guardar "" em v.
+  tentar
+    guardar lerjson de corpo em v.
+    guardar 1 em ok.
+  caso falhe
+    guardar 0 em ok.
+  fim.
+  se ok é igual a 0 então
+    devolver um registro com classe "invalido", id (fa_nulo de 0).
+  fim.
+  se tipo de v é diferente de "objeto" então
+    devolver um registro com classe "invalido", id (fa_nulo de 0).
+  fim.
+  se fa_tem de v e "id" é igual a 0 então
+    devolver um registro com classe "aviso", id (fa_nulo de 0).
+  fim.
+  se fa_tem de v e "method" é igual a 0 então
+    devolver um registro com classe "aviso", id (fa_nulo de 0).
+  fim.
+  devolver um registro com classe "pedido", id (obter de "id" e v).
+fim.
+
+# há quantos milissegundos a ponte apareceu (muito, se nunca)
+definir fa_ponte_idade de x
+  guardar 999999999 em idade.
+  se o arquivo "fila/ponte.vista" existe então
+    ler o arquivo "fila/ponte.vista" em t.
+    tentar
+      guardar (relogio de "ms") menos (numero de (aparar de t)) em idade.
+    caso falhe
+      guardar 999999999 em idade.
+    fim.
+  fim.
+  devolver idade.
+fim.
+
+# nome único do pedido: milissegundos e o número do processo (cada conexão é um processo)
+definir fa_novo_nome de x
+  devolver juntar (relogio de "ms") e "-" e (processo de "id").
+fim.
+
+# o id que a ponte devolve só tem algarismos e hífen (nada de caminho)
+definir fa_nome_ok de n
+  se tamanho de n é igual a 0 ou tamanho de n é maior que 40 então
+    devolver 0.
+  fim.
+  para cada b em bytes de n
+    se b é diferente de 45 então
+      se b é menor que 48 ou b é maior que 57 então
+        devolver 0.
+      fim.
+    fim.
+  fim.
+  devolver 1.
+fim.
+
+# a IA espera aqui: o pedido entra na fila e a resposta vem da ponte (até 110 s; sem ponte, desiste em 5 s)
+definir fa_encaminhar de corpo e id
+  guardar juntar "fila/" e (fa_novo_nome de 0) em base.
+  gravarbytes de (juntar base e ".tmp") e (bytes de corpo).
+  renomear de (juntar base e ".tmp") e (juntar base e ".pedido").
+  guardar juntar base e ".resposta" em arq_r.
+  guardar 0 em t.
+  enquanto t é menor que 1100
+    se o arquivo arq_r existe então
+      ler o arquivo arq_r em r.
+      apagar de arq_r.
+      devolver r.
+    fim.
+    se t é igual a 50 então
+      se fa_ponte_idade de 0 é maior que 90000 então
+        guardar 1100 em t.
+      fim.
+    fim.
+    esperar de 100.
+    guardar t mais 1 em t.
+  fim.
+  se o arquivo (juntar base e ".pedido") existe então
+    apagar de (juntar base e ".pedido").
+    devolver fa_erro_rpc de id e (0 menos 32000) e "o celular não respondeu: a ponte está desligada? No Termux: cd ~/sanxyC && ./ligar".
+  fim.
+  devolver fa_erro_rpc de id e (0 menos 32000) e "o celular pegou o pedido mas não respondeu em 110 s; tente de novo ou peça algo mais curto".
+fim.
+
+# respostas e pedidos esquecidos (mais de 5 minutos) saem da fila
+definir fa_limpar de x
+  guardar relogio de "ms" em agora.
+  para cada n em arquivos de "fila"
+    guardar procurar de "-" e n em p.
+    se p é maior que 0 então
+      guardar 0 em quando.
+      tentar
+        guardar numero de (cortar de n e 0 e p) em quando.
+      caso falhe
+        guardar 0 em quando.
+      fim.
+      se quando é maior que 0 e agora menos quando é maior que 300000 então
+        tentar
+          apagar de (juntar "fila/" e n).
+        caso falhe
+          guardar 0 em quando.
+        fim.
+      fim.
+    fim.
+  fim.
+fim.
+
+# a ponte espera aqui: pega o pedido mais antigo (renomear é atômico: só uma ponte pega cada um)
+definir fa_esperar de x
+  guardar 0 em t.
+  enquanto t é menor que 125
+    para cada n em ord_lista de (arquivos de "fila")
+      se termina_com de n e ".pedido" então
+        guardar cortar de n e 0 e ((tamanho de n) menos 7) em nome.
+        guardar 0 em pegou.
+        tentar
+          renomear de (juntar "fila/" e n) e (juntar "fila/" e nome e ".pego").
+          guardar 1 em pegou.
+        caso falhe
+          guardar 0 em pegou.
+        fim.
+        se pegou é igual a 1 então
+          ler o arquivo (juntar "fila/" e nome e ".pego") em corpo.
+          devolver json de (um registro com id nome, pedido corpo).
+        fim.
+      fim.
+    fim.
+    esperar de 200.
+    guardar t mais 1 em t.
+  fim.
+  devolver json de (um registro com vazio 1).
+fim.
+
+definir fa_saude de x
+  guardar 0 em esperando.
+  para cada n em arquivos de "fila"
+    se termina_com de n e ".pedido" então
+      guardar esperando mais 1 em esperando.
+    fim.
+  fim.
+  guardar fa_ponte_idade de 0 em idade.
+  devolver um registro com farol "sanxyC", ponte (idade é menor que 60000), pedidos_esperando esperando.
+fim.
+
+guardar ambiente "SANXYC_CHAVE" ou "" em chave.
+se tamanho de chave é menor que 16 então
+  avisar de "farol: defina SANXYC_CHAVE com 16 caracteres ou mais (no Render: Environment)".
+  sair de 2.
+fim.
+criarpasta de "fila".
+abrir servidor na porta ambiente "PORT" ou 10000
+  quando chegar pedido em "/" responder "farol do sanxyC: no ar (o MCP fica em /mcp=CHAVE)".
+  quando chegar pedido em "/saude" como json fazer
+    mostrar json de (fa_saude de 0).
+  fim.
+  quando chegar pedido em (juntar "/mcp=" e chave) como json fazer
+    se o método é diferente de "POST" então
+      responder com o código 405.
+      mostrar json de (um registro com erro "este MCP responde por POST, em JSON (sem SSE)").
+    senão
+      guardar fa_classificar de (o corpo) em c.
+      se c.classe é igual a "aviso" então
+        responder com o código 202.
+      senão
+        se c.classe é igual a "invalido" então
+          responder com o código 400.
+          mostrar fa_erro_rpc de c.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
+        senão
+          mostrar fa_encaminhar de (o corpo) e c.id.
+        fim.
+      fim.
+    fim.
+  fim.
+  quando chegar pedido em "/ponte/esperar" como json fazer
+    se o cabeçalho "authorization" é diferente de (juntar "Bearer " e chave) então
+      responder com o código 401.
+      mostrar json de (um registro com erro "chave errada: confira SANXYC_CHAVE no .env do celular e no Render").
+    senão
+      gravarbytes de "fila/ponte.vista" e (bytes de (juntar "" e (relogio de "ms"))).
+      fa_limpar de 0.
+      mostrar fa_esperar de 0.
+    fim.
+  fim.
+  quando chegar pedido em "/ponte/responder" como json fazer
+    se o cabeçalho "authorization" é diferente de (juntar "Bearer " e chave) então
+      responder com o código 401.
+      mostrar json de (um registro com erro "chave errada").
+    senão
+      guardar o parâmetro "id" em nome.
+      se fa_nome_ok de nome é igual a 0 então
+        responder com o código 400.
+        mostrar json de (um registro com erro "id inválido").
+      senão
+        gravarbytes de (juntar "fila/" e nome e ".rtmp") e (bytes de (o corpo)).
+        renomear de (juntar "fila/" e nome e ".rtmp") e (juntar "fila/" e nome e ".resposta").
+        se o arquivo (juntar "fila/" e nome e ".pego") existe então
+          apagar de (juntar "fila/" e nome e ".pego").
+        fim.
+        mostrar json de (um registro com ok 1).
+      fim.
+    fim.
+  fim.
+fim.

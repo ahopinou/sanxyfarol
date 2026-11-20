@@ -1,0 +1,14 @@
+# Blueprint do Render para o farol do sanxyC (serviço sanxyc -> https://sanxyc.onrender.com).
+# Assume que a raiz do que vai para o Render é esta pasta farol/ (com a pasta sanxyC inteira, use rootDir: farol).
+# SANXYC_CHAVE vai no painel, nunca no arquivo. O MCP das IAs fica em https://sanxyc.onrender.com/mcp=CHAVE.
+services:
+  - type: web
+    name: sanxyc
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /saude
+    envVars:
+      - key: SANXYC_CHAVE
+        sync: false
