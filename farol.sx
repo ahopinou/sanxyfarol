@@ -153,8 +153,11 @@ definir fa_pagina de titulo e texto
 fim.
 
 # a IA espera aqui: o pedido entra na fila e a resposta vem da ponte (até 110 s; sem ponte, desiste em 5 s)
-definir fa_encaminhar de corpo e id e ext
+definir fa_encaminhar de corpo e id e ext e agente
   guardar juntar "fila/" e (fa_novo_nome de 0) em base.
+  se agente é diferente de "" então
+    gravartexto de (juntar base e ".agente") e agente.
+  fim.
   gravartexto de (juntar base e ".tmp") e corpo.
   renomear de (juntar base e ".tmp") e (juntar base e ext).
   guardar juntar base e ".resposta" em arq_r.
@@ -240,6 +243,26 @@ definir fa_encaminhar_http de doca e caminho_r e metodo e consulta e conteudo e 
 fim.
 
 # respostas e pedidos esquecidos (mais de 5 minutos) saem da fila
+# o nome do agente no caminho /fabrica=CHAVE/a/NOME (ou /a/NOME/mcp): "" se não presta
+definir fa_agente_da_rota de cam e n_prefixo
+  guardar (tamanho de cam) menos n_prefixo em resto_n.
+  se resto_n é menor que 1 então
+    devolver "".
+  fim.
+  guardar cortar de cam e n_prefixo e resto_n em resto_c.
+  guardar procurar de "/" e resto_c em k.
+  se k é igual a 0 então
+    devolver "".
+  fim.
+  se k é maior que 0 então
+    guardar cortar de resto_c e 0 e k em resto_c.
+  fim.
+  se fa_doca_ok de resto_c é igual a 0 então
+    devolver "".
+  fim.
+  devolver resto_c.
+fim.
+
 definir fa_limpar de x
   guardar relogio de "ms" em agora.
   para cada n em arquivos de "fila"
@@ -294,7 +317,12 @@ definir fa_esperar de com_http e com_fabrica
           fim.
           se pegou_f é igual a 1 então
             ler o arquivo (juntar "fila/" e nome_f e ".fpego") em corpo_f.
-            devolver json de (um registro com id nome_f, pedido corpo_f, alvo "fabrica").
+            guardar "" em agente_f.
+            se o arquivo (juntar "fila/" e nome_f e ".agente") existe então
+              ler o arquivo (juntar "fila/" e nome_f e ".agente") em agente_f.
+              apagar de (juntar "fila/" e nome_f e ".agente").
+            fim.
+            devolver json de (um registro com id nome_f, pedido corpo_f, alvo "fabrica", agente (aparar de (juntar "" e agente_f))).
           fim.
         fim.
       fim.
@@ -395,7 +423,7 @@ abrir servidor na porta ambiente "PORT" ou 10000
           responder com o código 400.
           mostrar fa_erro_rpc de c.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
         senão
-          mostrar fa_encaminhar de (o corpo) e c.id e ".pedido".
+          mostrar fa_encaminhar de (o corpo) e c.id e ".pedido" e "".
         fim.
       fim.
     fim.
@@ -413,7 +441,33 @@ abrir servidor na porta ambiente "PORT" ou 10000
           responder com o código 400.
           mostrar fa_erro_rpc de cf.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
         senão
-          mostrar fa_encaminhar de (o corpo) e cf.id e ".fpedido".
+          mostrar fa_encaminhar de (o corpo) e cf.id e ".fpedido" e "".
+        fim.
+      fim.
+    fim.
+  fim.
+  # um conector por agente, como na Fábrica Node: /fabrica=CHAVE/a/mcp1, /a/mcp2, /a/mcp3 (o nome vai junto do
+  # pedido e o MCP da Fábrica fica sabendo quem chama; /a/NOME/mcp também vale)
+  quando chegar pedido em (juntar "/fabrica=" e chave e "/a/*") como json fazer
+    guardar fa_agente_da_rota de (o caminho) e (tamanho de (juntar "/fabrica=" e chave e "/a/")) em ag.
+    se ag é igual a "" então
+      responder com o código 404.
+      mostrar json de (um registro com erro "nome de agente inválido: use /fabrica=CHAVE/a/NOME (letras minúsculas, números, - e _)").
+    senão
+      se o método é diferente de "POST" então
+        responder com o código 405.
+        mostrar json de (um registro com erro "este MCP responde por POST, em JSON (sem SSE)").
+      senão
+        guardar fa_classificar de (o corpo) em ca.
+        se ca.classe é igual a "aviso" então
+          responder com o código 202.
+        senão
+          se ca.classe é igual a "invalido" então
+            responder com o código 400.
+            mostrar fa_erro_rpc de ca.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
+          senão
+            mostrar fa_encaminhar de (o corpo) e ca.id e ".fpedido" e ag.
+          fim.
         fim.
       fim.
     fim.
