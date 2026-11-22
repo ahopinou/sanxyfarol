@@ -1,12 +1,20 @@
-# farol do sanxyC: o endereço público (no Render) que as IAs chamam como MCP e que a ponte do celular busca.
-# Ele não guarda nada além da fila dos pedidos em andamento (pasta fila/); quem atende é o MCP no celular.
-#   POST /mcp=CHAVE              as IAs (MCP por HTTP, respostas em JSON); outro método dá 405
-#   POST /ponte/esperar          a ponte busca o próximo pedido (espera até 25 s)
-#   POST /ponte/responder?id=N   a ponte devolve a resposta
-#   GET  /saude                  vivo, se a ponte apareceu no último minuto e quantos pedidos esperam
+# farol do sanxyC: o endereço público (no Render) que as IAs chamam como MCP, que a ponte do celular busca e
+# que entrega na internet as docas públicas do celular (/x/NOME/). Ele não guarda nada além da fila dos
+# pedidos em andamento (pasta fila/); quem atende é o celular.
+#   POST /mcp=CHAVE                as IAs: o MCP da língua e do banco (respostas em JSON); outro método dá 405
+#   POST /fabrica=CHAVE            as IAs: o MCP da Fábrica (projetos, docas, tarefas, sala)
+#   *    /x/NOME/...               a doca pública NOME do celular (qualquer método; corpo até 8 MB)
+#   POST /ponte/esperar[?http=1&fabrica=1]   a ponte busca o próximo pedido (espera até 25 s); com http=1 também
+#                                  os /x/ e com fabrica=1 também os da Fábrica
+#   GET  /ponte/corpo?id=N         a ponte busca o corpo cru de um pedido /x/
+#   POST /ponte/responder?id=N     a ponte devolve a resposta de um pedido MCP
+#   POST /ponte/responder-http?id=N&status=S&tipo=T   a ponte devolve a resposta (corpo cru) de um pedido /x/
+#   GET  /saude                    vivo, se a ponte apareceu no último minuto e quantos pedidos esperam
 # Ambiente: SANXYC_CHAVE (obrigatória, 16 caracteres ou mais; a mesma do .env do celular) e PORT (o Render dá).
 # Compilar para o Render (na pasta sanxyC):  ./ligar farol
 #   (ou: sanxy/bin/sanxyc farol/farol.sx -o farol/farol-linux-x64 --alvo linux-x64)
+# Uma ponte antiga (sem http=1) continua recebendo só os pedidos MCP: farol e ponte podem ser trocados em
+# qualquer ordem.
 usar "../sanxy/pecas/texto".
 usar "../sanxy/pecas/ordenar".
 
@@ -73,6 +81,20 @@ definir fa_ponte_idade de x
   devolver idade.
 fim.
 
+# há quantos milissegundos uma ponte que atende /x/ apareceu (muito, se nunca)
+definir fa_ponte_http_idade de x
+  guardar 999999999 em idade.
+  se o arquivo "fila/ponte-http.vista" existe então
+    ler o arquivo "fila/ponte-http.vista" em t.
+    tentar
+      guardar (relogio de "ms") menos (numero de (aparar de t)) em idade.
+    caso falhe
+      guardar 999999999 em idade.
+    fim.
+  fim.
+  devolver idade.
+fim.
+
 # nome único do pedido: milissegundos e o número do processo (cada conexão é um processo)
 definir fa_novo_nome de x
   devolver juntar (relogio de "ms") e "-" e (processo de "id").
@@ -93,11 +115,48 @@ definir fa_nome_ok de n
   devolver 1.
 fim.
 
+# nome de doca: letras minúsculas, números, - e _ (até 40)
+definir fa_doca_ok de n
+  se tamanho de n é igual a 0 ou tamanho de n é maior que 40 então
+    devolver 0.
+  fim.
+  para cada b em bytes de n
+    guardar 0 em ok.
+    se b é maior ou igual a 97 e b é menor ou igual a 122 então
+      guardar 1 em ok.
+    fim.
+    se b é maior ou igual a 48 e b é menor ou igual a 57 então
+      guardar 1 em ok.
+    fim.
+    se b é igual a 45 ou b é igual a 95 então
+      guardar 1 em ok.
+    fim.
+    se ok é igual a 0 então
+      devolver 0.
+    fim.
+  fim.
+  devolver 1.
+fim.
+
+# /x/NOME/resto -> doca NOME, caminho "/resto" e barra 1; /x/NOME (sem a barra) -> barra 0
+definir fa_partes_x de cam
+  guardar cortar de cam e 3 e ((tamanho de cam) menos 3) em depois.
+  guardar procurar de "/" e depois em p.
+  se p é menor que 0 então
+    devolver um registro com doca depois, caminho "/", barra 0.
+  fim.
+  devolver um registro com doca (cortar de depois e 0 e p), caminho (cortar de depois e p e ((tamanho de depois) menos p)), barra 1.
+fim.
+
+definir fa_pagina de titulo e texto
+  devolver juntar "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>" e titulo e "</title><body style=\"font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#1d2433\"><h1 style=\"font-size:1.4rem\">" e titulo e "</h1><p style=\"line-height:1.5\">" e texto e "</p><p style=\"color:#667\">farol do sanxyC</p>".
+fim.
+
 # a IA espera aqui: o pedido entra na fila e a resposta vem da ponte (até 110 s; sem ponte, desiste em 5 s)
-definir fa_encaminhar de corpo e id
+definir fa_encaminhar de corpo e id e ext
   guardar juntar "fila/" e (fa_novo_nome de 0) em base.
-  gravarbytes de (juntar base e ".tmp") e (bytes de corpo).
-  renomear de (juntar base e ".tmp") e (juntar base e ".pedido").
+  gravartexto de (juntar base e ".tmp") e corpo.
+  renomear de (juntar base e ".tmp") e (juntar base e ext).
   guardar juntar base e ".resposta" em arq_r.
   guardar 0 em t.
   enquanto t é menor que 1100
@@ -114,11 +173,70 @@ definir fa_encaminhar de corpo e id
     esperar de 100.
     guardar t mais 1 em t.
   fim.
-  se o arquivo (juntar base e ".pedido") existe então
-    apagar de (juntar base e ".pedido").
-    devolver fa_erro_rpc de id e (0 menos 32000) e "o celular não respondeu: a ponte está desligada? No Termux: cd ~/sanxyC && ./ligar".
+  se o arquivo (juntar base e ext) existe então
+    apagar de (juntar base e ext).
+    devolver fa_erro_rpc de id e (0 menos 32000) e "o celular não respondeu: a ponte está desligada ou é antiga? No Termux: cd ~/sanxyC && ./ligar".
   fim.
   devolver fa_erro_rpc de id e (0 menos 32000) e "o celular pegou o pedido mas não respondeu em 110 s; tente de novo ou peça algo mais curto".
+fim.
+
+# um pedido /x/: o corpo cru vai num arquivo, a descrição em JSON; o visitante espera a resposta da ponte
+# (até 100 s; sem ponte que atende /x/, desiste em 3 s). Devolve um registro com status, tipo e corpo.
+definir fa_encaminhar_http de doca e caminho_r e metodo e consulta e conteudo e autorizacao e aceita e corpo
+  guardar juntar "fila/" e (fa_novo_nome de 0) em base.
+  se tamanho de corpo é maior que 0 então
+    gravartexto de (juntar base e ".corpo") e corpo.
+  fim.
+  guardar um mapa vazio em h.
+  colocar de h e "doca" e doca.
+  colocar de h e "metodo" e metodo.
+  colocar de h e "caminho" e caminho_r.
+  colocar de h e "consulta" e consulta.
+  colocar de h e "conteudo" e conteudo.
+  colocar de h e "autorizacao" e autorizacao.
+  colocar de h e "aceita" e aceita.
+  colocar de h e "tamanho" e (tamanho de corpo).
+  gravartexto de (juntar base e ".htmp") e (json de h).
+  renomear de (juntar base e ".htmp") e (juntar base e ".hpedido").
+  guardar juntar base e ".hresposta" em arq_r.
+  guardar 0 em t.
+  enquanto t é menor que 2000
+    se o arquivo arq_r existe então
+      guardar 200 em st.
+      guardar "application/octet-stream" em tp.
+      tentar
+        ler o arquivo (juntar base e ".hmeta") em meta_t.
+        guardar lerjson de meta_t em meta.
+        guardar meta.status em st.
+        guardar meta.tipo em tp.
+      caso falhe
+        guardar 502 em st.
+      fim.
+      ler o arquivo arq_r em r.
+      apagar de arq_r.
+      se o arquivo (juntar base e ".hmeta") existe então
+        apagar de (juntar base e ".hmeta").
+      fim.
+      devolver um registro com status st, tipo tp, corpo (juntar "" e r).
+    fim.
+    se t é igual a 60 então
+      se fa_ponte_http_idade de 0 é maior que 90000 então
+        guardar 2000 em t.
+      fim.
+    fim.
+    esperar de 50.
+    guardar t mais 1 em t.
+  fim.
+  guardar "o celular não pegou o pedido: a ponte está desligada ou é antiga (no Termux: cd ~/sanxyC && ./ligar construir && ./ligar)." em msg.
+  se o arquivo (juntar base e ".hpedido") existe então
+    apagar de (juntar base e ".hpedido").
+  senão
+    guardar "o celular pegou o pedido mas não respondeu em 100 s." em msg.
+  fim.
+  se o arquivo (juntar base e ".corpo") existe então
+    apagar de (juntar base e ".corpo").
+  fim.
+  devolver um registro com status 504, tipo "text/html; charset=utf-8", corpo (fa_pagina de "A doca não respondeu" e msg).
 fim.
 
 # respostas e pedidos esquecidos (mais de 5 minutos) saem da fila
@@ -144,10 +262,11 @@ definir fa_limpar de x
   fim.
 fim.
 
-# a ponte espera aqui: pega o pedido mais antigo (renomear é atômico: só uma ponte pega cada um)
-definir fa_esperar de x
+# a ponte espera aqui: pega o pedido mais antigo (renomear é atômico: só uma ponte pega cada um).
+# com_http 1: também os pedidos /x/ (a ponte nova avisa com ?http=1; a antiga só recebe MCP)
+definir fa_esperar de com_http e com_fabrica
   guardar 0 em t.
-  enquanto t é menor que 125
+  enquanto t é menor que 250
     para cada n em ord_lista de (arquivos de "fila")
       se termina_com de n e ".pedido" então
         guardar cortar de n e 0 e ((tamanho de n) menos 7) em nome.
@@ -163,8 +282,40 @@ definir fa_esperar de x
           devolver json de (um registro com id nome, pedido corpo).
         fim.
       fim.
+      se com_fabrica é igual a 1 então
+        se termina_com de n e ".fpedido" então
+          guardar cortar de n e 0 e ((tamanho de n) menos 8) em nome_f.
+          guardar 0 em pegou_f.
+          tentar
+            renomear de (juntar "fila/" e n) e (juntar "fila/" e nome_f e ".fpego").
+            guardar 1 em pegou_f.
+          caso falhe
+            guardar 0 em pegou_f.
+          fim.
+          se pegou_f é igual a 1 então
+            ler o arquivo (juntar "fila/" e nome_f e ".fpego") em corpo_f.
+            devolver json de (um registro com id nome_f, pedido corpo_f, alvo "fabrica").
+          fim.
+        fim.
+      fim.
+      se com_http é igual a 1 então
+        se termina_com de n e ".hpedido" então
+          guardar cortar de n e 0 e ((tamanho de n) menos 8) em nome_h.
+          guardar 0 em pegou_h.
+          tentar
+            renomear de (juntar "fila/" e n) e (juntar "fila/" e nome_h e ".hpego").
+            guardar 1 em pegou_h.
+          caso falhe
+            guardar 0 em pegou_h.
+          fim.
+          se pegou_h é igual a 1 então
+            ler o arquivo (juntar "fila/" e nome_h e ".hpego") em desc.
+            devolver json de (um registro com id nome_h, http (lerjson de desc)).
+          fim.
+        fim.
+      fim.
     fim.
-    esperar de 200.
+    esperar de 100.
     guardar t mais 1 em t.
   fim.
   devolver json de (um registro com vazio 1).
@@ -172,13 +323,52 @@ fim.
 
 definir fa_saude de x
   guardar 0 em esperando.
+  guardar 0 em esperando_http.
   para cada n em arquivos de "fila"
     se termina_com de n e ".pedido" então
       guardar esperando mais 1 em esperando.
     fim.
+    se termina_com de n e ".hpedido" então
+      guardar esperando_http mais 1 em esperando_http.
+    fim.
   fim.
   guardar fa_ponte_idade de 0 em idade.
-  devolver um registro com farol "sanxyC", ponte (idade é menor que 60000), pedidos_esperando esperando.
+  guardar fa_ponte_http_idade de 0 em idade_h.
+  guardar 999999999 em idade_f.
+  se o arquivo "fila/ponte-fabrica.vista" existe então
+    ler o arquivo "fila/ponte-fabrica.vista" em tf.
+    tentar
+      guardar (relogio de "ms") menos (numero de (aparar de tf)) em idade_f.
+    caso falhe
+      guardar 999999999 em idade_f.
+    fim.
+  fim.
+  devolver um registro com farol "sanxyC", ponte (idade é menor que 60000), fabrica (idade_f é menor que 60000), docas (idade_h é menor que 60000), pedidos_esperando esperando, paginas_esperando esperando_http.
+fim.
+
+# o status que a ponte manda (100 a 599; o resto vira 502)
+definir fa_status de t
+  guardar 502 em s.
+  tentar
+    guardar numero de t em s.
+  caso falhe
+    guardar 502 em s.
+  fim.
+  se s é menor que 100 ou s é maior que 599 então
+    guardar 502 em s.
+  fim.
+  devolver s.
+fim.
+
+# o tipo que a ponte manda: uma linha curta; o resto vira application/octet-stream
+definir fa_tipo de t
+  se tamanho de t é igual a 0 ou tamanho de t é maior que 200 então
+    devolver "application/octet-stream".
+  fim.
+  se procurar de "\r" e t é maior ou igual a 0 ou procurar de "\n" e t é maior ou igual a 0 então
+    devolver "application/octet-stream".
+  fim.
+  devolver t.
 fim.
 
 guardar ambiente "SANXYC_CHAVE" ou "" em chave.
@@ -188,7 +378,7 @@ se tamanho de chave é menor que 16 então
 fim.
 criarpasta de "fila".
 abrir servidor na porta ambiente "PORT" ou 10000
-  quando chegar pedido em "/" responder "farol do sanxyC: no ar (o MCP fica em /mcp=CHAVE)".
+  quando chegar pedido em "/" responder "farol do sanxyC: no ar (o MCP fica em /mcp=CHAVE; as docas públicas do celular em /x/NOME/)".
   quando chegar pedido em "/saude" como json fazer
     mostrar json de (fa_saude de 0).
   fim.
@@ -205,7 +395,25 @@ abrir servidor na porta ambiente "PORT" ou 10000
           responder com o código 400.
           mostrar fa_erro_rpc de c.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
         senão
-          mostrar fa_encaminhar de (o corpo) e c.id.
+          mostrar fa_encaminhar de (o corpo) e c.id e ".pedido".
+        fim.
+      fim.
+    fim.
+  fim.
+  quando chegar pedido em (juntar "/fabrica=" e chave) como json fazer
+    se o método é diferente de "POST" então
+      responder com o código 405.
+      mostrar json de (um registro com erro "este MCP responde por POST, em JSON (sem SSE)").
+    senão
+      guardar fa_classificar de (o corpo) em cf.
+      se cf.classe é igual a "aviso" então
+        responder com o código 202.
+      senão
+        se cf.classe é igual a "invalido" então
+          responder com o código 400.
+          mostrar fa_erro_rpc de cf.id e (0 menos 32700) e "o corpo não é um pedido JSON-RPC válido".
+        senão
+          mostrar fa_encaminhar de (o corpo) e cf.id e ".fpedido".
         fim.
       fim.
     fim.
@@ -215,9 +423,41 @@ abrir servidor na porta ambiente "PORT" ou 10000
       responder com o código 401.
       mostrar json de (um registro com erro "chave errada: confira SANXYC_CHAVE no .env do celular e no Render").
     senão
-      gravarbytes de "fila/ponte.vista" e (bytes de (juntar "" e (relogio de "ms"))).
+      gravartexto de "fila/ponte.vista" e (juntar "" e (relogio de "ms")).
+      guardar 0 em com_http.
+      se o parâmetro "http" é igual a "1" então
+        guardar 1 em com_http.
+        gravartexto de "fila/ponte-http.vista" e (juntar "" e (relogio de "ms")).
+      fim.
+      guardar 0 em com_fabrica.
+      se o parâmetro "fabrica" é igual a "1" então
+        guardar 1 em com_fabrica.
+        gravartexto de "fila/ponte-fabrica.vista" e (juntar "" e (relogio de "ms")).
+      fim.
       fa_limpar de 0.
-      mostrar fa_esperar de 0.
+      mostrar fa_esperar de com_http e com_fabrica.
+    fim.
+  fim.
+  quando chegar pedido em "/ponte/corpo" fazer
+    se o cabeçalho "authorization" é diferente de (juntar "Bearer " e chave) então
+      responder com o código 401.
+      escrever de "chave errada".
+    senão
+      guardar o parâmetro "id" em nome_c.
+      se fa_nome_ok de nome_c é igual a 0 então
+        responder com o código 400.
+        escrever de "id inválido".
+      senão
+        guardar juntar "fila/" e nome_c e ".corpo" em arq_c.
+        se o arquivo arq_c existe então
+          ler o arquivo arq_c em corpo_c.
+          responder com o tipo "application/octet-stream".
+          escrever de corpo_c.
+        senão
+          responder com o código 404.
+          escrever de "sem corpo".
+        fim.
+      fim.
     fim.
   fim.
   quando chegar pedido em "/ponte/responder" como json fazer
@@ -230,12 +470,59 @@ abrir servidor na porta ambiente "PORT" ou 10000
         responder com o código 400.
         mostrar json de (um registro com erro "id inválido").
       senão
-        gravarbytes de (juntar "fila/" e nome e ".rtmp") e (bytes de (o corpo)).
+        gravartexto de (juntar "fila/" e nome e ".rtmp") e (o corpo).
         renomear de (juntar "fila/" e nome e ".rtmp") e (juntar "fila/" e nome e ".resposta").
         se o arquivo (juntar "fila/" e nome e ".pego") existe então
           apagar de (juntar "fila/" e nome e ".pego").
         fim.
+        se o arquivo (juntar "fila/" e nome e ".fpego") existe então
+          apagar de (juntar "fila/" e nome e ".fpego").
+        fim.
         mostrar json de (um registro com ok 1).
+      fim.
+    fim.
+  fim.
+  quando chegar pedido em "/ponte/responder-http" como json fazer
+    se o cabeçalho "authorization" é diferente de (juntar "Bearer " e chave) então
+      responder com o código 401.
+      mostrar json de (um registro com erro "chave errada").
+    senão
+      guardar o parâmetro "id" em nome_r.
+      se fa_nome_ok de nome_r é igual a 0 então
+        responder com o código 400.
+        mostrar json de (um registro com erro "id inválido").
+      senão
+        guardar juntar "fila/" e nome_r em base_r.
+        guardar fa_status de (o parâmetro "status") em st_r.
+        guardar fa_tipo de (o parâmetro "tipo") em tp_r.
+        gravartexto de (juntar base_r e ".hmeta") e (json de (um registro com status st_r, tipo tp_r)).
+        gravartexto de (juntar base_r e ".hrtmp") e (o corpo).
+        renomear de (juntar base_r e ".hrtmp") e (juntar base_r e ".hresposta").
+        se o arquivo (juntar base_r e ".hpego") existe então
+          apagar de (juntar base_r e ".hpego").
+        fim.
+        se o arquivo (juntar base_r e ".corpo") existe então
+          apagar de (juntar base_r e ".corpo").
+        fim.
+        mostrar json de (um registro com ok 1).
+      fim.
+    fim.
+  fim.
+  quando chegar pedido em "/x/*" fazer
+    guardar fa_partes_x de (o caminho) em px.
+    se fa_doca_ok de px.doca é igual a 0 então
+      responder com o código 404.
+      responder com o tipo "text/html; charset=utf-8".
+      escrever de (fa_pagina de "Doca não encontrada" e "O endereço é /x/NOME/, com o nome de uma doca pública do celular (letras minúsculas, números, - e _).").
+    senão
+      se px.barra é igual a 0 então
+        responder com o tipo "text/html; charset=utf-8".
+        escrever de (juntar "<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=\"0; url=" e px.doca e "/\"><a href=\"" e px.doca e "/\">" e px.doca e "/</a>").
+      senão
+        guardar fa_encaminhar_http de px.doca e px.caminho e (o método) e (a consulta) e (o cabeçalho "content-type") e (o cabeçalho "authorization") e (o cabeçalho "accept") e (o corpo) em resp.
+        responder com o código resp.status.
+        responder com o tipo resp.tipo.
+        escrever de resp.corpo.
       fim.
     fim.
   fim.
